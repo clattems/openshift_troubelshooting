@@ -83,8 +83,8 @@ check_prerequisites() {
     log_info "Checking for Service Mesh Operator..."
     
     # Check for Service Mesh 3 operator
-    SM3_INSTALLED=$(oc get csv -n openshift-operators 2>/dev/null | grep "servicemeshoperator3" | wc -l)
-    SM2_INSTALLED=$(oc get csv -n openshift-operators 2>/dev/null | grep "servicemeshoperator.v2" | wc -l)
+    SM3_INSTALLED=$(oc get csv -n openshift-operators 2>/dev/null | grep -c "servicemeshoperator3" || echo "0")
+    SM2_INSTALLED=$(oc get csv -n openshift-operators 2>/dev/null | grep -c "servicemeshoperator.v2" || echo "0")
     
     if [ "$SM3_INSTALLED" -eq 0 ]; then
         log_error "Red Hat OpenShift Service Mesh 3 Operator not found"
@@ -95,7 +95,6 @@ check_prerequisites() {
             log_error ""
             log_error "To use Service Mesh 3:"
             log_error "1. Install 'Red Hat OpenShift Service Mesh 3' from OperatorHub"
-            log_error "2. Or modify this script to use Service Mesh 2 APIs"
         else
             log_error "Please install the Red Hat OpenShift Service Mesh 3 Operator first"
             log_error "You can install it from: Operators -> OperatorHub -> Red Hat OpenShift Service Mesh"
@@ -103,27 +102,26 @@ check_prerequisites() {
         exit 1
     fi
     
-    # Get operator status for Service Mesh 3 - check the PHASE column
-    OPERATOR_STATUS=$(oc get csv -n openshift-operators 2>/dev/null | grep "servicemeshoperator3" | awk '{print $NF}')
+    # Get operator status for Service Mesh 3 - use grep and awk more carefully
+    OPERATOR_LINE=$(oc get csv -n openshift-operators 2>/dev/null | grep "servicemeshoperator3")
+    OPERATOR_STATUS=$(echo "$OPERATOR_LINE" | awk '{for(i=1;i<=NF;i++) if($i=="Succeeded") print $i}')
+    
     if [ -z "$OPERATOR_STATUS" ]; then
-        log_error "Could not determine Service Mesh 3 Operator status"
+        log_error "Could not determine Service Mesh 3 Operator status or it's not 'Succeeded'"
+        log_error "Current operator state:"
         oc get csv -n openshift-operators | grep servicemesh
+        log_error ""
+        log_error "Wait for the Service Mesh 3 operator to show 'Succeeded' status"
         exit 1
     fi
     
-    if [ "$OPERATOR_STATUS" != "Succeeded" ]; then
-        log_error "Service Mesh 3 Operator status is '$OPERATOR_STATUS', expected 'Succeeded'"
-        log_error "Wait for the operator to finish installing"
-        oc get csv -n openshift-operators | grep servicemesh
-        exit 1
-    fi
     log_info "✓ Service Mesh 3 Operator is installed and ready (Status: $OPERATOR_STATUS)"
     
-    # Warn if both SM2 and SM3 are installed
+    # Note if both SM2 and SM3 are installed
     if [ "$SM2_INSTALLED" -gt 0 ]; then
         log_warn "Both Service Mesh 2 and 3 operators are installed"
-        log_warn "This can cause conflicts. Consider uninstalling Service Mesh 2"
-        log_warn "Continuing with Service Mesh 3..."
+        log_warn "This configuration is supported but may require careful namespace management"
+        log_warn "This script will use Service Mesh 3 APIs"
         echo ""
     fi
     
@@ -131,20 +129,31 @@ check_prerequisites() {
     log_info "Checking for Istio CRDs..."
     if ! oc get crd istios.sailoperator.io &> /dev/null; then
         log_error "Istio CRD (istios.sailoperator.io) not found"
-        log_error "The Service Mesh Operator may still be installing"
+        log_error "The Service Mesh 3 Operator may still be installing"
         log_error "Wait a few minutes and try again, or check operator status:"
-        log_error "  oc get csv -n openshift-operators"
+        log_error "  oc get csv -n openshift-operators | grep servicemesh"
         log_error "  oc get pods -n openshift-operators"
         exit 1
     fi
-    log_info "✓ Istio CRDs are installed"
+    log_info "✓ Istio CRDs are installed (istios.sailoperator.io)"
     
     if ! oc get crd istiocnis.sailoperator.io &> /dev/null; then
         log_error "IstioCNI CRD (istiocnis.sailoperator.io) not found"
-        log_error "The Service Mesh Operator may still be installing"
+        log_error "The Service Mesh 3 Operator may still be installing"
         exit 1
     fi
-    log_info "✓ IstioCNI CRDs are installed"
+    log_info "✓ IstioCNI CRDs are installed (istiocnis.sailoperator.io)"
+    
+    # Check that the sail-operator pod is running (Service Mesh 3's operator)
+    log_info "Checking Service Mesh 3 operator pod..."
+    SAIL_OPERATOR_READY=$(oc get pods -n openshift-operators -l app.kubernetes.io/name=sail-operator 2>/dev/null | grep -c "Running" || echo "0")
+    if [ "$SAIL_OPERATOR_READY" -eq 0 ]; then
+        log_error "Sail operator pod not found or not running"
+        log_error "This is the core Service Mesh 3 operator component"
+        oc get pods -n openshift-operators -l app.kubernetes.io/name=sail-operator
+        exit 1
+    fi
+    log_info "✓ Sail operator pod is running"
     
     # Check user permissions
     if ! oc auth can-i create project &> /dev/null; then
