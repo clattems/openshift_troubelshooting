@@ -143,7 +143,7 @@ check_prerequisites() {
     # Check that the sail-operator pod is running (Service Mesh 3's operator)
     log_info "Checking Service Mesh 3 operator pod..."
     SAIL_OPERATOR_READY=$(oc get pods -n openshift-operators -l app.kubernetes.io/name=sail-operator 2>/dev/null | grep -c "Running" || echo "0")
-    if [ "$SAIL_OPERATOR_READY" -eq 0 ]; then
+    if [ "$SAIL_OPERATOR_READY" -eq "0" ]; then
         log_error "Sail operator pod not found or not running"
         log_error "This is the core Service Mesh 3 operator component"
         oc get pods -n openshift-operators -l app.kubernetes.io/name=sail-operator
