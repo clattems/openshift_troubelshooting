@@ -608,41 +608,30 @@ if oc get deployment istio-ingressgateway -n bookinfo &> /dev/null 2>&1; then
     sleep 5
 fi
 
-if oc get service istio-ingressgateway -n bookinfo &> /dev/null 2>&1; then
-    log_info "Removing existing service..."
-    oc delete service istio-ingressgateway -n bookinfo --ignore-not-found=true
-fi
+oc delete service istio-ingressgateway -n bookinfo --ignore-not-found=true
+oc delete serviceaccount istio-ingressgateway -n bookinfo --ignore-not-found=true
+oc delete role,rolebinding -n bookinfo -l app=istio-ingressgateway --ignore-not-found=true
 
-if oc get serviceaccount istio-ingressgateway -n bookinfo &> /dev/null 2>&1; then
-    log_info "Removing existing service account..."
-    oc delete serviceaccount istio-ingressgateway -n bookinfo --ignore-not-found=true
-fi
-
-log_info "Creating Istio Ingress Gateway..."
-cat <<EOF | oc apply -n bookinfo -f -
+log_info "Creating Istio Ingress Gateway using gateway injection method..."
+cat <<'EOF' | oc apply -n bookinfo -f -
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: istio-ingressgateway
-  namespace: bookinfo
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: istio-ingressgateway
-  namespace: bookinfo
 spec:
-  replicas: 1
   selector:
     matchLabels:
-      app: istio-ingressgateway
       istio: ingressgateway
   template:
     metadata:
       annotations:
         inject.istio.io/templates: gateway
       labels:
-        app: istio-ingressgateway
         istio: ingressgateway
         sidecar.istio.io/inject: "true"
     spec:
@@ -650,56 +639,88 @@ spec:
       containers:
       - name: istio-proxy
         image: auto
-        resources:
-          requests:
-            cpu: 100m
-            memory: 128Mi
-          limits:
-            cpu: 2000m
-            memory: 1024Mi
----
+EOF
+
+if [ $? -ne 0 ]; then
+    log_error "Failed to create Ingress Gateway deployment"
+    exit 1
+fi
+
+# Create the service separately
+cat <<'EOF' | oc apply -n bookinfo -f -
 apiVersion: v1
 kind: Service
 metadata:
   name: istio-ingressgateway
-  namespace: bookinfo
   labels:
-    app: istio-ingressgateway
     istio: ingressgateway
 spec:
-  type: ClusterIP
-  selector:
-    app: istio-ingressgateway
-    istio: ingressgateway
   ports:
-  - name: http
+  - name: http2
     port: 80
-    targetPort: 8080
     protocol: TCP
+    targetPort: 8080
   - name: https
     port: 443
-    targetPort: 8443
     protocol: TCP
+    targetPort: 8443
+  selector:
+    istio: ingressgateway
+  type: ClusterIP
 EOF
 
 if [ $? -ne 0 ]; then
-    log_error "Failed to create Ingress Gateway"
-    log_error "Checking for any remaining resources..."
-    oc get deployment,service,serviceaccount -n bookinfo | grep ingressgateway || true
+    log_error "Failed to create Ingress Gateway service"
     exit 1
 fi
 
-log_info "Waiting for Ingress Gateway to be ready..."
-sleep 10
+log_info "Waiting for Ingress Gateway pods to be created..."
+sleep 15
 
+# Wait for pods to exist
+TIMEOUT=60
+ELAPSED=0
+while [ $ELAPSED -lt $TIMEOUT ]; do
+    POD_COUNT=$(oc get pods -n bookinfo -l istio=ingressgateway --no-headers 2>/dev/null | wc -l)
+    if [ "$POD_COUNT" -gt 0 ]; then
+        log_info "✓ Gateway pod(s) created"
+        break
+    fi
+    echo -n "."
+    sleep 5
+    ELAPSED=$((ELAPSED + 5))
+done
+
+log_info "Waiting for Ingress Gateway to be ready..."
 if ! oc wait --for=condition=Available deployment/istio-ingressgateway -n bookinfo --timeout=300s 2>/dev/null; then
     log_error "Ingress Gateway deployment failed to become available"
     log_error "Deployment status:"
-    oc get deployment istio-ingressgateway -n bookinfo
+    oc get deployment istio-ingressgateway -n bookinfo -o yaml | grep -A 20 "status:"
     log_error "Pod status:"
-    oc get pods -l app=istio-ingressgateway -n bookinfo
-    log_error "Pod details:"
-    oc describe pods -l app=istio-ingressgateway -n bookinfo | tail -20
+    oc get pods -l istio=ingressgateway -n bookinfo
+    log_error "Pod containers:"
+    oc get pods -l istio=ingressgateway -n bookinfo -o jsonpath='{range .items[*]}{.metadata.name}{" - containers: "}{.spec.containers[*].name}{" - ready: "}{.status.containerStatuses[*].ready}{"\n"}{end}'
+    log_error "Recent events:"
+    oc get events -n bookinfo --sort-by='.lastTimestamp' | tail -20
+    exit 1
+fi
+
+# Verify the gateway pod configuration
+log_check "Verifying gateway pod has proper Istio configuration..."
+GATEWAY_POD=$(oc get pods -n bookinfo -l istio=ingressgateway -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+if [ -n "$GATEWAY_POD" ]; then
+    CONTAINER_COUNT=$(oc get pod "$GATEWAY_POD" -n bookinfo -o jsonpath='{.spec.containers[*].name}' | wc -w)
+    CONTAINERS=$(oc get pod "$GATEWAY_POD" -n bookinfo -o jsonpath='{.spec.containers[*].name}')
+    log_info "Gateway pod: $GATEWAY_POD has $CONTAINER_COUNT container(s): $CONTAINERS"
+    
+    if [ "$CONTAINER_COUNT" -ge 2 ] || echo "$CONTAINERS" | grep -q "istio-proxy"; then
+        log_info "✓ Gateway pod has proper Istio sidecar"
+    else
+        log_warn "Gateway may not have Istio sidecar injected properly"
+        log_warn "This might still work if using the gateway injection template"
+    fi
+else
+    log_error "Could not find gateway pod"
     exit 1
 fi
 
