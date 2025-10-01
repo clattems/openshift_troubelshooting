@@ -406,6 +406,9 @@ if oc get istio default -n istio-system &> /dev/null 2>&1; then
 else
     log_info "Creating Istio control plane resource..."
     
+    # Temporarily disable exit on error for this section
+    set +e
+    
     # Create a temp file for the Istio resource
     ISTIO_YAML=$(mktemp)
     cat > "$ISTIO_YAML" <<'EOFISTIO'
@@ -420,15 +423,27 @@ spec:
 EOFISTIO
     
     # Try to create the resource
-    if ! oc apply -f "$ISTIO_YAML" 2>&1 | tee /tmp/istio-create.log; then
+    APPLY_OUTPUT=$(oc apply -f "$ISTIO_YAML" 2>&1)
+    APPLY_STATUS=$?
+    
+    # Re-enable exit on error
+    set -e
+    
+    if [ $APPLY_STATUS -ne 0 ]; then
         # Check if the error is from SM2 operator
-        if grep -q "ensure CRDs are installed first" /tmp/istio-create.log; then
+        if echo "$APPLY_OUTPUT" | grep -q "ensure CRDs are installed first"; then
             log_warn "Service Mesh 2 operator is interfering with Istio creation"
             log_warn "Attempting retry in 5 seconds..."
             sleep 5
             
-            if ! oc apply -f "$ISTIO_YAML"; then
+            set +e
+            APPLY_OUTPUT=$(oc apply -f "$ISTIO_YAML" 2>&1)
+            APPLY_STATUS=$?
+            set -e
+            
+            if [ $APPLY_STATUS -ne 0 ]; then
                 log_error "Failed to create Istio resource after retry"
+                echo "$APPLY_OUTPUT"
                 log_error ""
                 log_error "This is due to Service Mesh 2 and 3 conflict."
                 log_error "To fix this, remove Service Mesh 2 operator:"
@@ -436,22 +451,22 @@ EOFISTIO
                 log_error "  oc delete \$SM2_CSV -n openshift-operators"
                 log_error ""
                 log_error "After removing SM2, wait 1 minute and run this script again."
-                rm -f "$ISTIO_YAML" /tmp/istio-create.log
+                rm -f "$ISTIO_YAML"
                 exit 1
             else
                 log_info "✓ Istio resource created on retry"
             fi
         else
             log_error "Failed to create Istio resource"
-            cat /tmp/istio-create.log
-            rm -f "$ISTIO_YAML" /tmp/istio-create.log
+            echo "$APPLY_OUTPUT"
+            rm -f "$ISTIO_YAML"
             exit 1
         fi
     else
         log_info "✓ Istio resource created"
     fi
     
-    rm -f "$ISTIO_YAML" /tmp/istio-create.log
+    rm -f "$ISTIO_YAML"
 fi
 
 log_info "Waiting for Istio Control Plane to be ready (this may take a few minutes)..."
