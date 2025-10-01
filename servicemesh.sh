@@ -144,12 +144,35 @@ check_prerequisites() {
     log_info "Checking Service Mesh 3 operator pod..."
     SAIL_OPERATOR_READY=$(oc get pods -n openshift-operators -l app.kubernetes.io/name=sail-operator 2>/dev/null | grep "Running" | wc -l)
     if [ "$SAIL_OPERATOR_READY" -eq 0 ]; then
-        log_error "Sail operator pod not found or not running"
-        log_error "This is the core Service Mesh 3 operator component"
-        oc get pods -n openshift-operators -l app.kubernetes.io/name=sail-operator
-        exit 1
+        log_warn "Sail operator pod not found or not running"
+        log_warn "Waiting up to 2 minutes for sail-operator to start..."
+        
+        TIMEOUT=120
+        ELAPSED=0
+        while [ $ELAPSED -lt $TIMEOUT ]; do
+            SAIL_OPERATOR_READY=$(oc get pods -n openshift-operators -l app.kubernetes.io/name=sail-operator 2>/dev/null | grep "Running" | wc -l)
+            if [ "$SAIL_OPERATOR_READY" -gt 0 ]; then
+                log_info "✓ Sail operator pod is now running"
+                break
+            fi
+            echo -n "."
+            sleep 5
+            ELAPSED=$((ELAPSED + 5))
+        done
+        
+        if [ "$SAIL_OPERATOR_READY" -eq 0 ]; then
+            log_error "Sail operator pod did not start within 2 minutes"
+            log_error "This is the core Service Mesh 3 operator component"
+            log_error "Current operator pods:"
+            oc get pods -n openshift-operators
+            log_error ""
+            log_error "Check Service Mesh 3 operator status:"
+            oc get csv -n openshift-operators | grep servicemesh
+            exit 1
+        fi
+    else
+        log_info "✓ Sail operator pod is running"
     fi
-    log_info "✓ Sail operator pod is running"
     
     # Check user permissions
     if ! oc auth can-i create project &> /dev/null; then
