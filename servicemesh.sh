@@ -600,26 +600,26 @@ echo ""
 # Step 9: Deploy Ingress Gateway
 log_info "Step 9: Deploying Istio Ingress Gateway..."
 
-# Check if there's an existing deployment with issues and clean it up
+# Clean up any existing gateway resources to avoid immutable field errors
 if oc get deployment istio-ingressgateway -n bookinfo &> /dev/null 2>&1; then
-    log_warn "Ingress gateway deployment already exists"
-    # Check if it's healthy
-    REPLICAS_READY=$(oc get deployment istio-ingressgateway -n bookinfo -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo "0")
-    if [ "$REPLICAS_READY" -eq 0 ]; then
-        log_warn "Existing deployment is not healthy, recreating..."
-        oc delete deployment istio-ingressgateway -n bookinfo --ignore-not-found=true
-        oc delete service istio-ingressgateway -n bookinfo --ignore-not-found=true
-        oc delete serviceaccount istio-ingressgateway -n bookinfo --ignore-not-found=true
-        sleep 5
-    else
-        log_info "Existing deployment is healthy, skipping creation"
-        skip_gateway_creation=true
-    fi
+    log_warn "Found existing ingress gateway deployment, removing it to ensure clean deployment..."
+    oc delete deployment istio-ingressgateway -n bookinfo --ignore-not-found=true
+    log_info "Waiting for deployment to be fully deleted..."
+    sleep 5
 fi
 
-if [ "${skip_gateway_creation:-false}" != "true" ]; then
-    log_info "Creating Istio Ingress Gateway..."
-    cat <<EOF | oc apply -n bookinfo -f -
+if oc get service istio-ingressgateway -n bookinfo &> /dev/null 2>&1; then
+    log_info "Removing existing service..."
+    oc delete service istio-ingressgateway -n bookinfo --ignore-not-found=true
+fi
+
+if oc get serviceaccount istio-ingressgateway -n bookinfo &> /dev/null 2>&1; then
+    log_info "Removing existing service account..."
+    oc delete serviceaccount istio-ingressgateway -n bookinfo --ignore-not-found=true
+fi
+
+log_info "Creating Istio Ingress Gateway..."
+cat <<EOF | oc apply -n bookinfo -f -
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -682,18 +682,25 @@ spec:
     protocol: TCP
 EOF
 
-    if [ $? -ne 0 ]; then
-        log_error "Failed to create Ingress Gateway"
-        exit 1
-    fi
-    
-    log_info "Waiting for Ingress Gateway to be ready..."
-    if ! oc wait --for=condition=Available deployment/istio-ingressgateway -n bookinfo --timeout=300s 2>/dev/null; then
-        log_error "Ingress Gateway deployment failed to become available"
-        oc get deployment istio-ingressgateway -n bookinfo
-        oc get pods -l app=istio-ingressgateway -n bookinfo
-        exit 1
-    fi
+if [ $? -ne 0 ]; then
+    log_error "Failed to create Ingress Gateway"
+    log_error "Checking for any remaining resources..."
+    oc get deployment,service,serviceaccount -n bookinfo | grep ingressgateway || true
+    exit 1
+fi
+
+log_info "Waiting for Ingress Gateway to be ready..."
+sleep 10
+
+if ! oc wait --for=condition=Available deployment/istio-ingressgateway -n bookinfo --timeout=300s 2>/dev/null; then
+    log_error "Ingress Gateway deployment failed to become available"
+    log_error "Deployment status:"
+    oc get deployment istio-ingressgateway -n bookinfo
+    log_error "Pod status:"
+    oc get pods -l app=istio-ingressgateway -n bookinfo
+    log_error "Pod details:"
+    oc describe pods -l app=istio-ingressgateway -n bookinfo | tail -20
+    exit 1
 fi
 
 log_info "✓ Ingress Gateway deployed"
