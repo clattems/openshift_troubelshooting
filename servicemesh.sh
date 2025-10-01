@@ -80,11 +80,42 @@ check_prerequisites() {
     log_info "✓ Cluster version: $CLUSTER_VERSION"
     
     # Check if Service Mesh Operator is installed
-    if ! oc get csv -n openshift-operators | grep -q "servicemeshoperator"; then
-        log_error "Service Mesh Operator not found. Please install it first."
+    log_info "Checking for Service Mesh Operator..."
+    if ! oc get csv -n openshift-operators 2>/dev/null | grep -q "servicemeshoperator"; then
+        log_error "Service Mesh Operator not found in openshift-operators namespace"
+        log_error "Please install the Red Hat OpenShift Service Mesh Operator first"
+        log_error "You can install it from: Operators -> OperatorHub -> Red Hat OpenShift Service Mesh"
         exit 1
     fi
-    log_info "✓ Service Mesh Operator is installed"
+    
+    # Get operator status
+    OPERATOR_STATUS=$(oc get csv -n openshift-operators -o json 2>/dev/null | grep -A 2 "servicemeshoperator" | grep "phase" | head -1 | cut -d'"' -f4 || echo "Unknown")
+    if [ "$OPERATOR_STATUS" != "Succeeded" ]; then
+        log_error "Service Mesh Operator status is '$OPERATOR_STATUS', expected 'Succeeded'"
+        log_error "Wait for the operator to finish installing"
+        oc get csv -n openshift-operators | grep servicemesh
+        exit 1
+    fi
+    log_info "✓ Service Mesh Operator is installed and ready"
+    
+    # Check for required CRDs
+    log_info "Checking for Istio CRDs..."
+    if ! oc get crd istios.sailoperator.io &> /dev/null; then
+        log_error "Istio CRD (istios.sailoperator.io) not found"
+        log_error "The Service Mesh Operator may still be installing"
+        log_error "Wait a few minutes and try again, or check operator status:"
+        log_error "  oc get csv -n openshift-operators"
+        log_error "  oc get pods -n openshift-operators"
+        exit 1
+    fi
+    log_info "✓ Istio CRDs are installed"
+    
+    if ! oc get crd istiocnis.sailoperator.io &> /dev/null; then
+        log_error "IstioCNI CRD (istiocnis.sailoperator.io) not found"
+        log_error "The Service Mesh Operator may still be installing"
+        exit 1
+    fi
+    log_info "✓ IstioCNI CRDs are installed"
     
     # Check user permissions
     if ! oc auth can-i create project &> /dev/null; then
