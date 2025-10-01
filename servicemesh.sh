@@ -83,18 +83,17 @@ check_prerequisites() {
     log_info "Checking for Service Mesh Operator..."
     
     # Check for Service Mesh 3 operator
-    SM3_INSTALLED=$(oc get csv -n openshift-operators 2>/dev/null | grep -c "servicemeshoperator3" || echo "0")
-    SM2_INSTALLED=$(oc get csv -n openshift-operators 2>/dev/null | grep -c "servicemeshoperator.v2" || echo "0")
+    SM3_LINE=$(oc get csv -n openshift-operators 2>/dev/null | grep "servicemeshoperator3" || echo "")
+    SM2_LINE=$(oc get csv -n openshift-operators 2>/dev/null | grep "servicemeshoperator.v2" || echo "")
     
-    if [ "$SM3_INSTALLED" -eq 0 ]; then
+    if [ -z "$SM3_LINE" ]; then
         log_error "Red Hat OpenShift Service Mesh 3 Operator not found"
-        if [ "$SM2_INSTALLED" -gt 0 ]; then
+        if [ -n "$SM2_LINE" ]; then
             log_error "Service Mesh 2 is installed, but this script requires Service Mesh 3"
             log_error "You have these operators installed:"
             oc get csv -n openshift-operators | grep servicemesh
             log_error ""
-            log_error "To use Service Mesh 3:"
-            log_error "1. Install 'Red Hat OpenShift Service Mesh 3' from OperatorHub"
+            log_error "Please install 'Red Hat OpenShift Service Mesh 3' from OperatorHub"
         else
             log_error "Please install the Red Hat OpenShift Service Mesh 3 Operator first"
             log_error "You can install it from: Operators -> OperatorHub -> Red Hat OpenShift Service Mesh"
@@ -102,23 +101,20 @@ check_prerequisites() {
         exit 1
     fi
     
-    # Get operator status for Service Mesh 3 - use grep and awk more carefully
-    OPERATOR_LINE=$(oc get csv -n openshift-operators 2>/dev/null | grep "servicemeshoperator3")
-    OPERATOR_STATUS=$(echo "$OPERATOR_LINE" | awk '{for(i=1;i<=NF;i++) if($i=="Succeeded") print $i}')
-    
-    if [ -z "$OPERATOR_STATUS" ]; then
-        log_error "Could not determine Service Mesh 3 Operator status or it's not 'Succeeded'"
+    # Check if the line contains "Succeeded"
+    if ! echo "$SM3_LINE" | grep -q "Succeeded"; then
+        log_error "Service Mesh 3 Operator is not in 'Succeeded' state"
         log_error "Current operator state:"
-        oc get csv -n openshift-operators | grep servicemesh
+        echo "$SM3_LINE"
         log_error ""
         log_error "Wait for the Service Mesh 3 operator to show 'Succeeded' status"
         exit 1
     fi
     
-    log_info "✓ Service Mesh 3 Operator is installed and ready (Status: $OPERATOR_STATUS)"
+    log_info "✓ Service Mesh 3 Operator is installed and ready"
     
     # Note if both SM2 and SM3 are installed
-    if [ "$SM2_INSTALLED" -gt 0 ]; then
+    if [ -n "$SM2_LINE" ]; then
         log_warn "Both Service Mesh 2 and 3 operators are installed"
         log_warn "This configuration is supported but may require careful namespace management"
         log_warn "This script will use Service Mesh 3 APIs"
