@@ -599,27 +599,51 @@ echo ""
 
 # Step 9: Deploy Ingress Gateway
 log_info "Step 9: Deploying Istio Ingress Gateway..."
-cat <<EOF | oc apply -n bookinfo -f -
+
+# Check if there's an existing deployment with issues and clean it up
+if oc get deployment istio-ingressgateway -n bookinfo &> /dev/null 2>&1; then
+    log_warn "Ingress gateway deployment already exists"
+    # Check if it's healthy
+    REPLICAS_READY=$(oc get deployment istio-ingressgateway -n bookinfo -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo "0")
+    if [ "$REPLICAS_READY" -eq 0 ]; then
+        log_warn "Existing deployment is not healthy, recreating..."
+        oc delete deployment istio-ingressgateway -n bookinfo --ignore-not-found=true
+        oc delete service istio-ingressgateway -n bookinfo --ignore-not-found=true
+        oc delete serviceaccount istio-ingressgateway -n bookinfo --ignore-not-found=true
+        sleep 5
+    else
+        log_info "Existing deployment is healthy, skipping creation"
+        skip_gateway_creation=true
+    fi
+fi
+
+if [ "${skip_gateway_creation:-false}" != "true" ]; then
+    log_info "Creating Istio Ingress Gateway..."
+    cat <<EOF | oc apply -n bookinfo -f -
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: istio-ingressgateway
+  namespace: bookinfo
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: istio-ingressgateway
+  namespace: bookinfo
 spec:
   replicas: 1
   selector:
     matchLabels:
       app: istio-ingressgateway
+      istio: ingressgateway
   template:
     metadata:
       annotations:
         inject.istio.io/templates: gateway
       labels:
         app: istio-ingressgateway
+        istio: ingressgateway
         sidecar.istio.io/inject: "true"
     spec:
       serviceAccountName: istio-ingressgateway
@@ -638,26 +662,40 @@ apiVersion: v1
 kind: Service
 metadata:
   name: istio-ingressgateway
+  namespace: bookinfo
+  labels:
+    app: istio-ingressgateway
+    istio: ingressgateway
 spec:
   type: ClusterIP
   selector:
     app: istio-ingressgateway
+    istio: ingressgateway
   ports:
   - name: http
     port: 80
     targetPort: 8080
+    protocol: TCP
   - name: https
     port: 443
     targetPort: 8443
+    protocol: TCP
 EOF
 
-log_info "Waiting for Ingress Gateway to be ready..."
-if ! oc wait --for=condition=Available deployment/istio-ingressgateway -n bookinfo --timeout=300s 2>/dev/null; then
-    log_error "Ingress Gateway deployment failed to become available"
-    oc get deployment istio-ingressgateway -n bookinfo
-    oc get pods -l app=istio-ingressgateway -n bookinfo
-    exit 1
+    if [ $? -ne 0 ]; then
+        log_error "Failed to create Ingress Gateway"
+        exit 1
+    fi
+    
+    log_info "Waiting for Ingress Gateway to be ready..."
+    if ! oc wait --for=condition=Available deployment/istio-ingressgateway -n bookinfo --timeout=300s 2>/dev/null; then
+        log_error "Ingress Gateway deployment failed to become available"
+        oc get deployment istio-ingressgateway -n bookinfo
+        oc get pods -l app=istio-ingressgateway -n bookinfo
+        exit 1
+    fi
 fi
+
 log_info "✓ Ingress Gateway deployed"
 echo ""
 
