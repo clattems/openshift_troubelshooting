@@ -81,22 +81,44 @@ check_prerequisites() {
     
     # Check if Service Mesh Operator is installed
     log_info "Checking for Service Mesh Operator..."
-    if ! oc get csv -n openshift-operators 2>/dev/null | grep -q "servicemeshoperator"; then
-        log_error "Service Mesh Operator not found in openshift-operators namespace"
-        log_error "Please install the Red Hat OpenShift Service Mesh Operator first"
-        log_error "You can install it from: Operators -> OperatorHub -> Red Hat OpenShift Service Mesh"
+    
+    # Check for Service Mesh 3 operator
+    SM3_INSTALLED=$(oc get csv -n openshift-operators 2>/dev/null | grep "servicemeshoperator3" | wc -l)
+    SM2_INSTALLED=$(oc get csv -n openshift-operators 2>/dev/null | grep "servicemeshoperator.v2" | wc -l)
+    
+    if [ "$SM3_INSTALLED" -eq 0 ]; then
+        log_error "Red Hat OpenShift Service Mesh 3 Operator not found"
+        if [ "$SM2_INSTALLED" -gt 0 ]; then
+            log_error "Service Mesh 2 is installed, but this script requires Service Mesh 3"
+            log_error "You have these operators installed:"
+            oc get csv -n openshift-operators | grep servicemesh
+            log_error ""
+            log_error "To use Service Mesh 3:"
+            log_error "1. Install 'Red Hat OpenShift Service Mesh 3' from OperatorHub"
+            log_error "2. Or modify this script to use Service Mesh 2 APIs"
+        else
+            log_error "Please install the Red Hat OpenShift Service Mesh 3 Operator first"
+            log_error "You can install it from: Operators -> OperatorHub -> Red Hat OpenShift Service Mesh"
+        fi
         exit 1
     fi
     
-    # Get operator status
-    OPERATOR_STATUS=$(oc get csv -n openshift-operators -o json 2>/dev/null | grep -A 2 "servicemeshoperator" | grep "phase" | head -1 | cut -d'"' -f4 || echo "Unknown")
+    # Get operator status for Service Mesh 3
+    OPERATOR_STATUS=$(oc get csv -n openshift-operators -o jsonpath='{.items[?(@.metadata.name~"servicemeshoperator3")].status.phase}' 2>/dev/null || echo "Unknown")
     if [ "$OPERATOR_STATUS" != "Succeeded" ]; then
-        log_error "Service Mesh Operator status is '$OPERATOR_STATUS', expected 'Succeeded'"
+        log_error "Service Mesh 3 Operator status is '$OPERATOR_STATUS', expected 'Succeeded'"
         log_error "Wait for the operator to finish installing"
         oc get csv -n openshift-operators | grep servicemesh
         exit 1
     fi
-    log_info "✓ Service Mesh Operator is installed and ready"
+    log_info "✓ Service Mesh 3 Operator is installed and ready"
+    
+    # Warn if both SM2 and SM3 are installed
+    if [ "$SM2_INSTALLED" -gt 0 ]; then
+        log_warn "Both Service Mesh 2 and 3 operators are installed"
+        log_warn "This can cause conflicts. Consider uninstalling Service Mesh 2"
+        log_warn "Continuing with Service Mesh 3..."
+    fi
     
     # Check for required CRDs
     log_info "Checking for Istio CRDs..."
