@@ -103,21 +103,28 @@ check_prerequisites() {
         exit 1
     fi
     
-    # Get operator status for Service Mesh 3
-    OPERATOR_STATUS=$(oc get csv -n openshift-operators -o jsonpath='{.items[?(@.metadata.name~"servicemeshoperator3")].status.phase}' 2>/dev/null || echo "Unknown")
+    # Get operator status for Service Mesh 3 - check the PHASE column
+    OPERATOR_STATUS=$(oc get csv -n openshift-operators 2>/dev/null | grep "servicemeshoperator3" | awk '{print $NF}')
+    if [ -z "$OPERATOR_STATUS" ]; then
+        log_error "Could not determine Service Mesh 3 Operator status"
+        oc get csv -n openshift-operators | grep servicemesh
+        exit 1
+    fi
+    
     if [ "$OPERATOR_STATUS" != "Succeeded" ]; then
         log_error "Service Mesh 3 Operator status is '$OPERATOR_STATUS', expected 'Succeeded'"
         log_error "Wait for the operator to finish installing"
         oc get csv -n openshift-operators | grep servicemesh
         exit 1
     fi
-    log_info "✓ Service Mesh 3 Operator is installed and ready"
+    log_info "✓ Service Mesh 3 Operator is installed and ready (Status: $OPERATOR_STATUS)"
     
     # Warn if both SM2 and SM3 are installed
     if [ "$SM2_INSTALLED" -gt 0 ]; then
         log_warn "Both Service Mesh 2 and 3 operators are installed"
         log_warn "This can cause conflicts. Consider uninstalling Service Mesh 2"
         log_warn "Continuing with Service Mesh 3..."
+        echo ""
     fi
     
     # Check for required CRDs
@@ -380,7 +387,20 @@ echo ""
 
 # Step 2: Create Istio Control Plane
 log_info "Step 2: Deploying Istio Control Plane..."
-cat <<EOF | oc apply -f -
+
+# First verify the Istio CRD is available
+if ! oc get crd istios.sailoperator.io &> /dev/null; then
+    log_error "Istio CRD not available. Checking operator pods..."
+    oc get pods -n openshift-operators -l name=sail-operator
+    exit 1
+fi
+
+# Check if an Istio resource already exists
+if oc get istio default -n istio-system &> /dev/null 2>&1; then
+    log_warn "Istio resource 'default' already exists, skipping creation"
+else
+    log_info "Creating Istio control plane resource..."
+    cat <<EOF | oc apply -f -
 apiVersion: sailoperator.io/v1alpha1
 kind: Istio
 metadata:
@@ -390,12 +410,44 @@ spec:
   version: v1.24.6
   namespace: istio-system
 EOF
+    
+    if [ $? -ne 0 ]; then
+        log_error "Failed to create Istio resource"
+        log_error "This might be due to Service Mesh 2 and 3 conflict"
+        log_error "Try removing Service Mesh 2 operator:"
+        log_error "  oc delete csv servicemeshoperator.v2.6.10 -n openshift-operators"
+        exit 1
+    fi
+fi
 
 log_info "Waiting for Istio Control Plane to be ready (this may take a few minutes)..."
-if ! oc wait --for=condition=Ready istio/default -n istio-system --timeout=300s 2>/dev/null; then
+sleep 10
+
+# More robust wait with better error handling
+TIMEOUT=300
+ELAPSED=0
+while [ $ELAPSED -lt $TIMEOUT ]; do
+    if oc get istio default -n istio-system &> /dev/null; then
+        STATUS=$(oc get istio default -n istio-system -o jsonpath='{.status.state}' 2>/dev/null || echo "")
+        if [ "$STATUS" == "Healthy" ]; then
+            log_info "✓ Istio is Healthy"
+            break
+        else
+            echo -n "."
+        fi
+    else
+        log_error "Istio resource disappeared or was not created"
+        exit 1
+    fi
+    sleep 5
+    ELAPSED=$((ELAPSED + 5))
+done
+
+if [ $ELAPSED -ge $TIMEOUT ]; then
     log_error "Istio Control Plane failed to become ready within 5 minutes"
     log_error "Checking status..."
     oc get istio default -n istio-system -o yaml
+    oc get pods -n istio-system
     exit 1
 fi
 
@@ -418,7 +470,13 @@ echo ""
 
 # Step 4: Deploy Istio CNI Plugin
 log_info "Step 4: Deploying Istio CNI Plugin..."
-cat <<EOF | oc apply -f -
+
+# Check if an IstioCNI resource already exists
+if oc get istiocni default -n istio-cni &> /dev/null 2>&1; then
+    log_warn "IstioCNI resource 'default' already exists, skipping creation"
+else
+    log_info "Creating IstioCNI resource..."
+    cat <<EOF | oc apply -f -
 apiVersion: sailoperator.io/v1alpha1
 kind: IstioCNI
 metadata:
@@ -428,12 +486,41 @@ spec:
   version: v1.24.6
   namespace: istio-cni
 EOF
+    
+    if [ $? -ne 0 ]; then
+        log_error "Failed to create IstioCNI resource"
+        exit 1
+    fi
+fi
 
 log_info "Waiting for Istio CNI to be ready (this may take a few minutes)..."
-if ! oc wait --for=condition=Ready istiocni/default -n istio-cni --timeout=300s 2>/dev/null; then
+sleep 10
+
+# More robust wait with better error handling
+TIMEOUT=300
+ELAPSED=0
+while [ $ELAPSED -lt $TIMEOUT ]; do
+    if oc get istiocni default -n istio-cni &> /dev/null; then
+        STATUS=$(oc get istiocni default -n istio-cni -o jsonpath='{.status.state}' 2>/dev/null || echo "")
+        if [ "$STATUS" == "Healthy" ]; then
+            log_info "✓ IstioCNI is Healthy"
+            break
+        else
+            echo -n "."
+        fi
+    else
+        log_error "IstioCNI resource disappeared or was not created"
+        exit 1
+    fi
+    sleep 5
+    ELAPSED=$((ELAPSED + 5))
+done
+
+if [ $ELAPSED -ge $TIMEOUT ]; then
     log_error "Istio CNI failed to become ready within 5 minutes"
     log_error "Checking status..."
     oc get istiocni default -n istio-cni -o yaml
+    oc get pods -n istio-cni
     exit 1
 fi
 
