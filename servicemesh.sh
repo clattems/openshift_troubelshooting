@@ -406,8 +406,9 @@ if oc get istio default -n istio-system &> /dev/null 2>&1; then
 else
     log_info "Creating Istio control plane resource..."
     
-    # Create the resource and capture any errors
-    ISTIO_CREATE_OUTPUT=$(cat <<EOF | oc apply -f - 2>&1
+    # Create a temp file for the Istio resource
+    ISTIO_YAML=$(mktemp)
+    cat > "$ISTIO_YAML" <<'EOFISTIO'
 apiVersion: sailoperator.io/v1alpha1
 kind: Istio
 metadata:
@@ -416,51 +417,41 @@ metadata:
 spec:
   version: v1.24.6
   namespace: istio-system
-EOF
-)
+EOFISTIO
     
-    ISTIO_CREATE_STATUS=$?
-    
-    if [ $ISTIO_CREATE_STATUS -ne 0 ]; then
+    # Try to create the resource
+    if ! oc apply -f "$ISTIO_YAML" 2>&1 | tee /tmp/istio-create.log; then
         # Check if the error is from SM2 operator
-        if echo "$ISTIO_CREATE_OUTPUT" | grep -q "ensure CRDs are installed first"; then
+        if grep -q "ensure CRDs are installed first" /tmp/istio-create.log; then
             log_warn "Service Mesh 2 operator is interfering with Istio creation"
-            log_warn "This is a known issue with both SM2 and SM3 installed"
-            log_warn "Attempting workaround..."
-            
-            # Wait a moment and try again - sometimes SM3 operator wins on retry
+            log_warn "Attempting retry in 5 seconds..."
             sleep 5
-            ISTIO_CREATE_OUTPUT=$(cat <<EOF | oc apply -f - 2>&1
-apiVersion: sailoperator.io/v1alpha1
-kind: Istio
-metadata:
-  name: default
-  namespace: istio-system
-spec:
-  version: v1.24.6
-  namespace: istio-system
-EOF
-)
-            ISTIO_CREATE_STATUS=$?
-        fi
-        
-        if [ $ISTIO_CREATE_STATUS -ne 0 ]; then
-            log_error "Failed to create Istio resource"
-            echo "$ISTIO_CREATE_OUTPUT"
-            log_error ""
-            log_error "This is likely due to Service Mesh 2 and 3 conflict."
-            log_error "To fix this, you need to remove Service Mesh 2 operator:"
-            log_error "  oc get csv -n openshift-operators | grep servicemeshoperator.v2"
-            log_error "  oc delete csv <servicemesh-v2-csv-name> -n openshift-operators"
-            log_error ""
-            log_error "After removing SM2, wait 1 minute and run this script again."
-            exit 1
+            
+            if ! oc apply -f "$ISTIO_YAML"; then
+                log_error "Failed to create Istio resource after retry"
+                log_error ""
+                log_error "This is due to Service Mesh 2 and 3 conflict."
+                log_error "To fix this, remove Service Mesh 2 operator:"
+                log_error "  SM2_CSV=\$(oc get csv -n openshift-operators -o name | grep servicemeshoperator.v2)"
+                log_error "  oc delete \$SM2_CSV -n openshift-operators"
+                log_error ""
+                log_error "After removing SM2, wait 1 minute and run this script again."
+                rm -f "$ISTIO_YAML" /tmp/istio-create.log
+                exit 1
+            else
+                log_info "✓ Istio resource created on retry"
+            fi
         else
-            log_info "✓ Istio resource created on retry"
+            log_error "Failed to create Istio resource"
+            cat /tmp/istio-create.log
+            rm -f "$ISTIO_YAML" /tmp/istio-create.log
+            exit 1
         fi
     else
         log_info "✓ Istio resource created"
     fi
+    
+    rm -f "$ISTIO_YAML" /tmp/istio-create.log
 fi
 
 log_info "Waiting for Istio Control Plane to be ready (this may take a few minutes)..."
