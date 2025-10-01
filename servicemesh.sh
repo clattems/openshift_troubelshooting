@@ -4,7 +4,7 @@
 # Prerequisites: Service Mesh Operator already installed
 # OpenShift 4.19+ with Service Mesh 3.0
 
-set -e
+# Note: set -e removed to allow proper error handling with SM2/SM3 conflicts
 
 # Color output for better readability
 RED='\033[0;31m'
